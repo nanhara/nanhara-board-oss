@@ -1,0 +1,15 @@
+node_modules/
+dist/
+src-tauri/target/
+.DS_Store
+*.log
+.env
+.env.*
+!.env.example
+coverage/
+release-artifacts/
+native/**/bin/
+native/**/obj/
+# Desktop-only product: the Tauri icon generator also emits unused mobile sets.
+src-tauri/icons/android/
+src-tauri/icons/ios/

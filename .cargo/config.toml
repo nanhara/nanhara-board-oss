@@ -1,0 +1,7 @@
+# The workstation and Windows build runner are in mainland China. The lockfile
+# still verifies crate checksums; this mirror only provides a reliable transport.
+[source.crates-io]
+replace-with = "rsproxy-sparse"
+
+[source.rsproxy-sparse]
+registry = "sparse+https://rsproxy.cn/index/"
