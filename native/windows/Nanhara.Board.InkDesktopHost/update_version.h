@@ -5,7 +5,7 @@
 
 namespace board_update
 {
-inline constexpr unsigned current_preview = 10;
+inline constexpr unsigned current_preview = 11;
 
 inline bool is_newer_preview(std::string_view version, unsigned current) noexcept
 {

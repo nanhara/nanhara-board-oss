@@ -44,7 +44,7 @@ namespace
 {
 constexpr wchar_t kMainWindowClass[] = L"NanharaBoardInkDesktopHostWindow";
 constexpr wchar_t kCanvasWindowClass[] = L"NanharaBoardInkDesktopHostCanvas";
-constexpr wchar_t kWindowTitle[] = L"南荒白板 · 多页书写预览 0.2.0-alpha.10";
+constexpr wchar_t kWindowTitle[] = L"南荒白板 · 多页书写预览 0.2.0-alpha.11";
 constexpr std::size_t kMaxUndoHistoryEntries = 512;
 
 constexpr COLORREF kBrandInk = RGB(23, 59, 52);
@@ -2001,14 +2001,23 @@ private:
                             // independently and keep one undo entry per physical stroke.
                             for (const auto& stroke : args.Strokes())
                             {
-                                threadState->CollectStroke(stroke.PointerId());
                                 if (!threadState->applyingHistory)
                                 {
-                                    threadState->strokePages[stroke.Id()] = threadState->activePage;
+                                    const auto strokeId = stroke.Id();
+                                    threadState->strokePages[strokeId] = threadState->activePage;
                                     InkHistoryEntry entry;
                                     entry.kind = InkHistoryKind::Added;
-                                    entry.strokeIds.push_back(stroke.Id());
+                                    entry.strokeIds.push_back(strokeId);
                                     threadState->PushHistory(threadState->activePage, std::move(entry));
+                                }
+                                try
+                                {
+                                    threadState->CollectStroke(stroke.PointerId());
+                                }
+                                catch (const winrt::hresult_error&)
+                                {
+                                    // Pointer correlation only gates page switches. A released
+                                    // pointer ages out even when the stroke cannot report its ID.
                                 }
                             }
                             const auto count = sender.StrokeContainer().GetStrokes().Size();
@@ -2023,6 +2032,9 @@ private:
                         }
                         catch (...)
                         {
+                            PostMessageW(statusWindow, kMessageInkError,
+                                static_cast<WPARAM>(winrt::to_hresult()),
+                                static_cast<LPARAM>(InkOperationStage::RuntimeOperation));
                         }
                     });
 
