@@ -81,6 +81,7 @@ constexpr UINT kMessageStrokeCount = WM_APP + 2;
 constexpr UINT kMessageInkError = WM_APP + 3;
 constexpr UINT kMessagePageChanged = WM_APP + 4;
 constexpr UINT kMessagePreviewAvailable = WM_APP + 5;
+constexpr UINT kMessageEraserMode = WM_APP + 6;
 constexpr LPARAM kPageChangeFailed = -1;
 
 enum class InkOperationStage : int
@@ -296,11 +297,17 @@ enum class InkHistoryKind
     Cleared,
 };
 
+struct RemovedInkStroke final
+{
+    std::uint32_t id;
+    inking::InkStroke stroke;
+};
+
 struct InkHistoryEntry final
 {
     InkHistoryKind kind{InkHistoryKind::Added};
     std::vector<std::uint32_t> strokeIds;
-    std::vector<inking::InkStroke> strokeSnapshots;
+    std::vector<RemovedInkStroke> removedStrokes;
 };
 
 struct InkPage final
@@ -378,7 +385,7 @@ struct InkThreadState final
 
     void PushHistory(const std::size_t pageIndex, InkHistoryEntry entry)
     {
-        if (entry.strokeIds.empty() && entry.strokeSnapshots.empty())
+        if (entry.strokeIds.empty() && entry.removedStrokes.empty())
         {
             return;
         }
@@ -774,6 +781,21 @@ private:
 
         case kMessagePreviewAvailable:
             ShowWindow(updateButton_, SW_SHOWNA);
+            return 0;
+
+        case kMessageEraserMode:
+            if (wParam == eraserRequest_)
+            {
+                const HRESULT result = static_cast<HRESULT>(lParam);
+                eraserActive_ = SUCCEEDED(result);
+                mode_ = eraserActive_ ? L"橡皮" : penColorLabel_ + L" · " + penWidthLabel_;
+                if (!eraserActive_)
+                {
+                    inputSource_ = L"橡皮切换失败 " + FormatHresult(result);
+                }
+                InvalidateToolbar();
+                RefreshStatus();
+            }
             return 0;
 
         case WM_CTLCOLORSTATIC:
@@ -2056,16 +2078,17 @@ private:
                                 std::unordered_map<std::size_t, InkHistoryEntry> historyByPage;
                                 for (const auto& stroke : args.Strokes())
                                 {
-                                    const auto owner = threadState->strokePages.find(stroke.Id());
+                                    const auto strokeId = stroke.Id();
+                                    const auto owner = threadState->strokePages.find(strokeId);
                                     if (owner == threadState->strokePages.end())
                                     {
                                         continue;
                                     }
                                     auto& entry = historyByPage[owner->second];
                                     entry.kind = InkHistoryKind::Erased;
-                                    // A stroke cannot belong to two InkStrokeContainers. Keep a
-                                    // detached clone that can be cloned again when undo restores it.
-                                    entry.strokeSnapshots.push_back(stroke.Clone());
+                                    // The presenter already removed this stroke. Retain it on the
+                                    // ink thread and copy its geometry only if undo restores it.
+                                    entry.removedStrokes.push_back({strokeId, stroke});
                                     threadState->strokePages.erase(owner);
                                 }
                                 for (auto& [pageIndex, entry] : historyByPage)
@@ -2267,6 +2290,7 @@ private:
 
     void ApplyPenSettings()
     {
+        ++eraserRequest_;
         eraserActive_ = false;
         mode_ = penColorLabel_ + L" · " + penWidthLabel_;
         const auto threadState = inkThreadState_;
@@ -2309,18 +2333,32 @@ private:
 
     void SetEraser()
     {
-        eraserActive_ = true;
-        mode_ = L"橡皮";
-        const auto threadState = inkThreadState_;
-        QueueInkWork([threadState]()
+        if (!inkReady_ || eraserActive_)
         {
-            if (threadState && threadState->presenter)
+            return;
+        }
+        const auto request = ++eraserRequest_;
+        const HWND statusWindow = window_;
+        const auto threadState = inkThreadState_;
+        QueueInkWork([threadState, statusWindow, request]()
+        {
+            HRESULT result = RO_E_CLOSED;
+            try
             {
-                threadState->presenter.InputProcessingConfiguration().Mode(
-                    inking::InkInputProcessingMode::Erasing);
+                if (threadState && threadState->presenter)
+                {
+                    threadState->presenter.InputProcessingConfiguration().Mode(
+                        inking::InkInputProcessingMode::Erasing);
+                    result = S_OK;
+                }
             }
+            catch (...)
+            {
+                result = winrt::to_hresult();
+            }
+            PostMessageW(statusWindow, kMessageEraserMode, request, static_cast<LPARAM>(result));
         });
-        InvalidateToolbar();
+        mode_ = L"正在切换橡皮…";
         RefreshStatus();
     }
 
@@ -2436,13 +2474,12 @@ private:
                 }
                 else
                 {
-                    for (const auto& snapshot : entry.strokeSnapshots)
+                    for (const auto& removed : entry.removedStrokes)
                     {
-                        const std::uint32_t previousId = snapshot.Id();
-                        auto restoredStroke = snapshot.Clone();
+                        auto restoredStroke = removed.stroke.Clone();
                         container.AddStroke(restoredStroke);
                         threadState->strokePages[restoredStroke.Id()] = threadState->activePage;
-                        threadState->RemapStrokeId(previousId, restoredStroke.Id());
+                        threadState->RemapStrokeId(removed.id, restoredStroke.Id());
                     }
                 }
                 winrt::check_hresult(compositionDevice->Commit());
@@ -2480,7 +2517,7 @@ private:
             entry.kind = InkHistoryKind::Cleared;
             for (const auto& stroke : strokes)
             {
-                entry.strokeSnapshots.push_back(stroke.Clone());
+                entry.removedStrokes.push_back({stroke.Id(), stroke.Clone()});
             }
             threadState->PushHistory(threadState->activePage, std::move(entry));
 
@@ -2690,6 +2727,7 @@ private:
     std::uint32_t inputSequence_{};
     std::uint32_t strokeCount_{};
     std::uint32_t undoDepth_{};
+    std::uint32_t eraserRequest_{};
     colors::Color penColor_{ToInkColor(kChalkWhite)};
     float penSize_{kPenMediumSize};
     int activeColorControl_{ControlBlack};
